@@ -4,3 +4,5 @@ plotly
 Jinja2
 matplotlib
 yfinance
+openpyxl
+xlsxwriter
