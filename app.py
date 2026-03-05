@@ -14,37 +14,51 @@ st.title("🛡️ Raw Material Price Watchdog")
 tab1, tab2, tab3 = st.tabs(["🚨 Variance Analysis", "📧 Email Generator", "📂 Data Management"])
 
 # --- TAB 3: 数据上传（写实逻辑） ---
+# --- TAB 3: 数据上传（写实逻辑 - 修复编码版） ---
 with tab3:
     st.subheader("Upload Original Price Book")
     uploaded_file = st.file_uploader("Upload CSV", type="csv")
     
     if uploaded_file:
         try:
-            # 自动找表头
-            preview = pd.read_csv(uploaded_file, header=None, nrows=50)
+            # --- 智能编码探测 ---
+            try:
+                # 先尝试用 utf-8 读
+                preview = pd.read_csv(uploaded_file, header=None, nrows=50, encoding='utf-8')
+                file_encoding = 'utf-8'
+            except UnicodeDecodeError:
+                # 如果报错，把文件指针拨回开头，换 gbk 读 (专门对付中文 Windows 导出的 CSV)
+                uploaded_file.seek(0)
+                preview = pd.read_csv(uploaded_file, header=None, nrows=50, encoding='gbk')
+                file_encoding = 'gbk'
+            
+            # --- 自动找表头 ---
             header_idx = 0
             for i, row in preview.iterrows():
                 if 'Part Number' in str(row.values) or '料号' in str(row.values):
                     header_idx = i
                     break
             
-            df = pd.read_csv(uploaded_file, header=header_idx)
+            # --- 读取完整数据 ---
+            uploaded_file.seek(0) # 再次把指针拨回开头
+            df = pd.read_csv(uploaded_file, header=header_idx, encoding=file_encoding)
             df.columns = df.columns.str.replace('\n', ' ', regex=False).str.strip()
             
-            # 自动映射关键列
+            # --- 自动映射关键列 ---
             mapping = {'Part Number': 'Part_No', 'Material U/P': 'Contract_UP', 'Vendor': 'Supplier'}
             final_cols = {col: mapping[k] for col in df.columns for k in mapping if k in col}
             
             if len(final_cols) < 2:
-                st.error("Missing key columns in CSV!")
+                st.error("Missing key columns in CSV! Please check the file.")
             else:
                 df_clean = df[list(final_cols.keys())].rename(columns=final_cols)
                 df_clean['Contract_UP'] = pd.to_numeric(df_clean['Contract_UP'].astype(str).str.replace(r'[\$,]', '', regex=True), errors='coerce')
                 
-                # 存入 Session，这样切换 Tab 数据不会丢
+                # 存入 Session
                 st.session_state['master_data'] = df_clean.dropna(subset=['Part_No', 'Contract_UP'])
-                st.success("Data Loaded Successfully!")
+                st.success(f"✅ Data Loaded Successfully! (Encoding: {file_encoding})")
                 st.dataframe(st.session_state['master_data'].head())
+                
         except Exception as e:
             st.error(f"Error: {e}")
 
