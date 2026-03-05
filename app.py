@@ -4,41 +4,35 @@ import plotly.express as px
 
 st.set_page_config(page_title="Price Watchdog v1.0", layout="wide")
 
-# --- 1. 侧边栏：实时行情 ---
-st.sidebar.header("📡 Market Live Feed")
-# 默认 2.85，你可以根据今天铝价手动改
-live_price = st.sidebar.number_input("Current Market Price (USD/kg)", value=2.85)
-
 st.title("🛡️ Raw Material Price Watchdog")
 
 tab1, tab2, tab3 = st.tabs(["🚨 Variance Analysis", "📧 Email Generator", "📂 Data Management"])
 
-# --- TAB 3: 数据上传（写实逻辑 - 终极装甲版） ---
+# ==========================================
+# TAB 3: 数据上传与解析 (升级了材料列抓取)
+# ==========================================
 with tab3:
     st.subheader("Upload Original Price Book")
     uploaded_file = st.file_uploader("Upload CSV", type="csv")
     
     if uploaded_file:
-        # 建立一个编码测试清单：按最有可能的顺序排
         encodings_to_try = ['utf-8', 'gb18030', 'utf-8-sig', 'latin1']
         successful_encoding = None
         preview = None
         
-        # --- 1. 终极编码探测循环 ---
         for enc in encodings_to_try:
             try:
-                uploaded_file.seek(0) # 每次尝试前，把文件指针拨回开头
+                uploaded_file.seek(0)
                 preview = pd.read_csv(uploaded_file, header=None, nrows=50, encoding=enc)
                 successful_encoding = enc
-                break # 如果没报错，就立刻跳出循环！
+                break
             except Exception:
-                continue # 如果报错了，就换下一个编码继续试
+                continue
                 
         if successful_encoding is None:
-            st.error("文件编码过于特殊，无法自动解析。请在 Excel 中打开该文件，然后选择『另存为 -> CSV (UTF-8 逗号分隔)』后重新上传。")
+            st.error("文件编码特殊，请在Excel另存为UTF-8格式的CSV。")
         else:
             try:
-                # --- 2. 自动找表头 ---
                 header_idx = 0
                 for i, row in preview.iterrows():
                     row_str = " ".join([str(x) for x in row.values])
@@ -46,49 +40,90 @@ with tab3:
                         header_idx = i
                         break
                 
-                # --- 3. 读取完整数据 ---
                 uploaded_file.seek(0) 
                 df = pd.read_csv(uploaded_file, header=header_idx, encoding=successful_encoding)
                 df.columns = df.columns.astype(str).str.replace('\n', ' ', regex=False).str.strip()
                 
-                # --- 4. 自动映射关键列 ---
-                mapping = {'Part Number': 'Part_No', 'Material U/P': 'Contract_UP', 'Vendor': 'Supplier'}
-                final_cols = {col: mapping[k] for col in df.columns for k in mapping if k in col}
+                # 💡【核心升级】：加入了对 Raw Material 的模糊匹配
+                mapping = {
+                    'Part Number': 'Part_No', 
+                    'Material U/P': 'Contract_UP', 
+                    'Vendor': 'Supplier',
+                    'Raw material': 'Material',  # 对应 Wisefull/XY 的表头
+                    'Material Spec': 'Material',
+                    '材质': 'Material'
+                }
                 
-                if len(final_cols) < 2:
-                    st.error(f"成功读取文件 (编码: {successful_encoding})，但找不到 'Part Number' 和 'Material U/P' 列，请检查表头名是否匹配。")
+                final_cols = {}
+                for col in df.columns:
+                    for k in mapping:
+                        if k.lower() in col.lower():
+                            final_cols[col] = mapping[k]
+                            break 
+                
+                if 'Part_No' not in final_cols.values():
+                    st.error("找不到核心列 'Part Number'。")
                 else:
                     df_clean = df[list(final_cols.keys())].rename(columns=final_cols)
                     df_clean['Contract_UP'] = pd.to_numeric(df_clean['Contract_UP'].astype(str).str.replace(r'[\$,]', '', regex=True), errors='coerce')
                     
-                    # 存入 Session
                     st.session_state['master_data'] = df_clean.dropna(subset=['Part_No', 'Contract_UP'])
-                    st.success(f"✅ Data Loaded Successfully! (Auto-detected encoding: {successful_encoding})")
-                    st.dataframe(st.session_state['master_data'].head())
+                    st.success("✅ 数据与原材料型号解析成功！")
                     
             except Exception as e:
                 st.error(f"处理数据时出错: {e}")
 
-# --- TAB 1: 分析逻辑（连通 Tab 3） ---
+# ==========================================
+# 侧边栏：动态市场行情板
+# ==========================================
+st.sidebar.header("📡 Market Live Feed")
+market_prices = {} # 用来装不同材料的市场价
+
+if 'master_data' in st.session_state and 'Material' in st.session_state['master_data'].columns:
+    st.sidebar.markdown("请更新以下**实时原材料价格 (USD/kg)**：")
+    
+    # 自动找出表格里所有不重复的原材料型号
+    unique_materials = st.session_state['master_data']['Material'].dropna().unique()
+    
+    # 为每种材料自动生成一个输入框
+    for mat in unique_materials:
+        # 默认先给个 2.95，你可以自己调
+        market_prices[mat] = st.sidebar.number_input(f"{mat}", value=2.95, step=0.01)
+else:
+    st.sidebar.info("上传数据后，此处将自动生成对应原材料的报价单。")
+    universal_price = st.sidebar.number_input("Global Price (USD/kg)", value=2.95, step=0.01)
+
+# ==========================================
+# TAB 1: 分析图表
+# ==========================================
 with tab1:
     if 'master_data' in st.session_state:
         df = st.session_state['master_data'].copy()
-        df['Market_Price'] = live_price
-        # 计算差异百分比
+        
+        # 💡【核心升级】：根据每行零件的具体材质，去查字典填入对应的市场价
+        if 'Material' in df.columns:
+            df['Market_Price'] = df['Material'].map(market_prices)
+            
+            # 重新排一下列的顺序，把 Material 放在显眼的位置
+            cols = ['Part_No', 'Material', 'Contract_UP', 'Market_Price']
+            df = df[cols + [c for c in df.columns if c not in cols]]
+        else:
+            df['Market_Price'] = universal_price
+            
+        # 计算差异（负数表示市场比合同便宜 = 我们亏了，有杀价空间）
         df['Variance_%'] = ((df['Market_Price'] - df['Contract_UP']) / df['Contract_UP'] * 100).round(2)
         
         st.subheader("Price Comparison Details")
-        # 重点显示降价空间（Variance 为负数代表市场更便宜）
+        st.write("注：Variance 为 **负数且标红**，代表当前市场价远低于当初的合同价，**存在杀价空间**。")
+        
+        # 显示带颜色的表格
         st.dataframe(df.style.background_gradient(cmap='RdYlGn', subset=['Variance_%']))
         
-        fig = px.bar(df, x='Part_No', y='Variance_%', title="Price Anomaly Heatmap")
-        st.plotly_chart(fig)
     else:
         st.warning("Please upload a file in Data Management first.")
 
-# --- TAB 2: 邮件生成 ---
+# ==========================================
+# TAB 2: 邮件生成
+# ==========================================
 with tab2:
-    if 'master_data' in st.session_state:
-        selected = st.selectbox("Select Part", st.session_state['master_data']['Part_No'])
-        # 自动生成基于真实数据的邮件...
-        st.write(f"Email draft for {selected} is ready.")
+    st.write("Email generator is ready for next phase.")
