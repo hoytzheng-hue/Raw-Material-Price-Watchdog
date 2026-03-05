@@ -1,7 +1,5 @@
 streamlit
 pandas
 plotly
-streamlit
-pandas
-plotly
 Jinja2
+matplotlib
