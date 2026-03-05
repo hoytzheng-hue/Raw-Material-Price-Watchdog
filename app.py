@@ -151,12 +151,40 @@ with tab1:
 # ==========================================
 with tab3:
     st.subheader("Database & API Status")
-    st.success("✅ Connected to Google Sheets (Quotation) & metal.com API.")
-    st.write("Market prices are now 100% powered by real-time API. Google Sheet is only used for Quotation History.")
+    st.success("✅ Connected to Google Sheets (Quotation)")
     
     if st.button("Clear Cache & Force Refresh APIs"):
         st.cache_data.clear()
         st.rerun()
+
+    st.markdown("---")
+    st.subheader("🛠️ API Debugger (API 诊断器)")
+    st.write("点击下方按钮，强制使用云服务器直接请求 metal.com，并打印真实响应码：")
+    
+    if st.button("🚨 测试 A380 实时接口"):
+        try:
+            import requests
+            url = "https://market.metal.com/history/api/getBriefMarket?muid=201303070021"
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+                "Referer": "https://www.metal.com/"
+            }
+            st.info("正在从 Streamlit 云服务器发送请求...")
+            response = requests.get(url, headers=headers, timeout=5)
+            
+            st.write(f"**HTTP 状态码 (Status Code):** `{response.status_code}`")
+            
+            if response.status_code == 200:
+                st.success("✅ 请求成功！网站没有拦截。")
+                st.json(response.json())
+            elif response.status_code in [403, 401]:
+                st.error("❌ 抓取失败！被 metal.com 的反爬虫防火墙拦截（判定为机器人 IP）。")
+                st.code(response.text[:200], language="html") # 打印前200个字符的拦截页面
+            else:
+                st.warning(f"⚠️ 其他错误。")
+                
+        except Exception as e:
+            st.error(f"❌ 运行报错: {e}")
 
 # ==========================================
 # TAB 2: Email Generator
