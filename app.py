@@ -99,11 +99,66 @@ Procurement Team
     """
     st.text_area("Draft Content (Copy to Outlook)", value=email_template, height=300)
 
-# --- TAB 3: Database Management ---
 with tab3:
-    st.subheader("Data Input Center")
-    col_a, col_b = st.columns(2)
-    with col_a:
-        st.file_uploader("Upload Scraper Feed (Market)", type="csv")
-    with col_b:
-        st.file_uploader("Upload Historical Price Book (Contract)", type="csv")
+    st.subheader("📂 原始报价单集成中心")
+    st.write("请上传供应商（如 XY, Wisefull）提供的原始报价单 CSV 文件。")
+    
+    uploaded_file = st.file_uploader("上传合同报价 (Contract Price Book)", type="csv")
+    
+    if uploaded_file:
+        try:
+            # --- 步骤 1: 自动定位表头 (关键！) ---
+            # 原始文件前几十行通常是杂质，我们扫描前 50 行寻找关键字
+            preview = pd.read_csv(uploaded_file, header=None, nrows=50)
+            header_idx = 0
+            for i, row in preview.iterrows():
+                row_str = " ".join([str(x) for x in row.values])
+                if "Part Number" in row_str or "料号" in row_str:
+                    header_idx = i
+                    break
+            
+            # --- 步骤 2: 以正确的表头行读取完整数据 ---
+            df = pd.read_csv(uploaded_file, header=header_idx)
+            
+            # 清理表头：去掉换行符、空格，统一格式
+            df.columns = df.columns.str.replace('\n', ' ', regex=False).str.strip()
+            
+            # --- 步骤 3: 智能列名映射 ---
+            # 即使供应商的列名微调，只要包含关键字就能抓取
+            mapping = {
+                'Part Number': 'Part_No',
+                'Material U/P': 'Contract_UP', # 对应你的 Material U/P ($/Kg)
+                'Part Gross Weight': 'Weight_g',
+                'Vendor': 'Supplier'
+            }
+            
+            final_mapping = {}
+            for col in df.columns:
+                for key, val in mapping.items():
+                    if key in col:
+                        final_mapping[col] = val
+            
+            # --- 步骤 4: 提取与清洗 ---
+            if 'Part Number' not in str(final_mapping.keys()) and len(final_mapping) < 2:
+                st.error("无法识别关键列。请确保 CSV 中包含 'Part Number' 和 'Material U/P'。")
+            else:
+                df_clean = df[list(final_mapping.keys())].rename(columns=final_mapping)
+                
+                # 清洗数字：去掉 $ 符号、逗号，并转为浮点数
+                for col in ['Contract_UP', 'Weight_g']:
+                    if col in df_clean.columns:
+                        df_clean[col] = pd.to_numeric(
+                            df_clean[col].astype(str).str.replace(r'[\$,]', '', regex=True), 
+                            errors='coerce'
+                        )
+                
+                # 去掉关键列为空的行
+                df_clean = df_clean.dropna(subset=['Part_No', 'Contract_UP'])
+                
+                # 存储到 Session State 供 Tab 1 调用
+                st.session_state['master_data'] = df_clean
+                st.success(f"✅ 成功解析 {len(df_clean)} 条零件数据！")
+                st.dataframe(df_clean.head(10)) # 展示前 10 行确认
+                
+        except Exception as e:
+            st.error(f"解析失败: {e}")
