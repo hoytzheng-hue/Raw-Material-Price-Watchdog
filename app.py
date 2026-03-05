@@ -9,11 +9,32 @@ st.title("🛡️ Raw Material Price Watchdog")
 tab1, tab2, tab3 = st.tabs(["🚨 Variance Analysis", "📧 Email Generator", "📂 Data Management"])
 
 # ==========================================
-# TAB 3: Data Upload & Parsing
+# TAB 3: Data Upload & Parsing (双数据源版)
 # ==========================================
 with tab3:
-    st.subheader("Upload Original Price Book")
-    uploaded_file = st.file_uploader("Upload CSV", type="csv")
+    st.subheader("Step 1: Upload Market Price Data (市场行情表)")
+    market_file = st.file_uploader("Upload Material.csv", type="csv", key="market_upload")
+    
+    if market_file:
+        try:
+            # 读取市场价文件，跳过可能的乱码行或特殊格式
+            df_market = pd.read_csv(market_file)
+            
+            # 找到材料名称列和美金价格列
+            mat_col = [c for c in df_market.columns if 'Material' in c or 'Grade' in c][0]
+            price_col = [c for c in df_market.columns if 'USD' in c or 'Cost' in c][0]
+            
+            # 清洗成字典格式，例如: {"ADC12 (Al Alloy)": 2.75}
+            market_dict = dict(zip(df_market[mat_col].astype(str), df_market[price_col]))
+            st.session_state['market_dict'] = market_dict
+            st.success(f"✅ Market data loaded! Found {len(market_dict)} materials.")
+        except Exception as e:
+            st.error(f"Error parsing market data: {e}")
+
+    st.markdown("---")
+    
+    st.subheader("Step 2: Upload Original Price Book (历史报价单)")
+    uploaded_file = st.file_uploader("Upload Supplier CSV", type="csv", key="pricebook_upload")
     
     if uploaded_file:
         encodings_to_try = ['utf-8', 'gb18030', 'utf-8-sig', 'latin1']
@@ -50,7 +71,7 @@ with tab3:
                     'Vendor': 'Supplier',
                     'Raw material': 'Material',
                     'Material Spec': 'Material',
-                    '材质': 'Material' # Kept for parsing Chinese CSV headers internally
+                    '材质': 'Material'
                 }
                 
                 final_cols = {}
@@ -67,27 +88,39 @@ with tab3:
                     df_clean['Contract_UP'] = pd.to_numeric(df_clean['Contract_UP'].astype(str).str.replace(r'[\$,]', '', regex=True), errors='coerce')
                     
                     st.session_state['master_data'] = df_clean.dropna(subset=['Part_No', 'Contract_UP'])
-                    st.success("✅ Data and Raw Material specs parsed successfully!")
+                    st.success("✅ Supplier Price Book parsed successfully!")
                     
             except Exception as e:
                 st.error(f"Error processing data: {e}")
 
 # ==========================================
-# Sidebar: Dynamic Market Board
+# Sidebar: Dynamic Market Board (智能回填)
 # ==========================================
 st.sidebar.header("📡 Market Live Feed")
 market_prices = {} 
+market_dict_db = st.session_state.get('market_dict', {})
 
 if 'master_data' in st.session_state and 'Material' in st.session_state['master_data'].columns:
-    st.sidebar.markdown("Please update the **Live Raw Material Prices (USD/kg)** below:")
+    st.sidebar.markdown("Auto-matched Market Prices (USD/kg):")
     
     unique_materials = st.session_state['master_data']['Material'].dropna().unique()
     
     for mat in unique_materials:
-        market_prices[mat] = st.sidebar.number_input(f"{mat}", value=2.95, step=0.01)
+        # --- 智能模糊匹配逻辑 ---
+        matched_price = 2.95 # 如果没找到，给个默认值
+        for db_mat, db_price in market_dict_db.items():
+            # 如果供应商写的材料名(如ADC12) 包含在 市场材料名(如 ADC12 (Al Alloy)) 中，或者反过来
+            if str(mat).lower() in str(db_mat).lower() or str(db_mat).lower() in str(mat).lower():
+                try:
+                    matched_price = float(db_price)
+                    break
+                except:
+                    pass
+        
+        # 自动填充匹配到的价格，但用户依然可以在侧边栏手动修改
+        market_prices[mat] = st.sidebar.number_input(f"{mat}", value=matched_price, step=0.01)
 else:
-    st.sidebar.info("Upload a Price Book to automatically generate material-specific price inputs here.")
-    universal_price = st.sidebar.number_input("Global Price (USD/kg)", value=2.95, step=0.01)
+    st.sidebar.info("Please upload both Market Data and Price Book in the Data Management tab.")
 
 # ==========================================
 # TAB 1: Variance Analysis
@@ -98,19 +131,15 @@ with tab1:
         
         if 'Material' in df.columns:
             df['Market_Price'] = df['Material'].map(market_prices)
-            
             cols = ['Part_No', 'Material', 'Contract_UP', 'Market_Price']
             df = df[cols + [c for c in df.columns if c not in cols]]
-        else:
-            df['Market_Price'] = universal_price
+            df['Variance_%'] = ((df['Market_Price'] - df['Contract_UP']) / df['Contract_UP'] * 100).round(2)
             
-        df['Variance_%'] = ((df['Market_Price'] - df['Contract_UP']) / df['Contract_UP'] * 100).round(2)
-        
-        st.subheader("Price Comparison Details")
-        st.write("Note: A **negative, red Variance** means the current market price is lower than the contract price, indicating **potential for price reduction**.")
-        
-        st.dataframe(df.style.background_gradient(cmap='RdYlGn', subset=['Variance_%']))
-        
+            st.subheader("Price Comparison Details")
+            st.write("Note: A **negative, red Variance** means the current market price is lower than the contract price.")
+            st.dataframe(df.style.background_gradient(cmap='RdYlGn', subset=['Variance_%']))
+        else:
+            st.warning("No material info found in Price Book.")
     else:
         st.warning("Please upload a file in Data Management first.")
 
