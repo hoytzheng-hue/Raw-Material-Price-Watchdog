@@ -13,54 +13,61 @@ st.title("🛡️ Raw Material Price Watchdog")
 
 tab1, tab2, tab3 = st.tabs(["🚨 Variance Analysis", "📧 Email Generator", "📂 Data Management"])
 
-# --- TAB 3: 数据上传（写实逻辑） ---
-# --- TAB 3: 数据上传（写实逻辑 - 修复编码版） ---
+# --- TAB 3: 数据上传（写实逻辑 - 终极装甲版） ---
 with tab3:
     st.subheader("Upload Original Price Book")
     uploaded_file = st.file_uploader("Upload CSV", type="csv")
     
     if uploaded_file:
-        try:
-            # --- 智能编码探测 ---
+        # 建立一个编码测试清单：按最有可能的顺序排
+        encodings_to_try = ['utf-8', 'gb18030', 'utf-8-sig', 'latin1']
+        successful_encoding = None
+        preview = None
+        
+        # --- 1. 终极编码探测循环 ---
+        for enc in encodings_to_try:
             try:
-                # 先尝试用 utf-8 读
-                preview = pd.read_csv(uploaded_file, header=None, nrows=50, encoding='utf-8')
-                file_encoding = 'utf-8'
-            except UnicodeDecodeError:
-                # 如果报错，把文件指针拨回开头，换 gbk 读 (专门对付中文 Windows 导出的 CSV)
-                uploaded_file.seek(0)
-                preview = pd.read_csv(uploaded_file, header=None, nrows=50, encoding='gbk')
-                file_encoding = 'gbk'
-            
-            # --- 自动找表头 ---
-            header_idx = 0
-            for i, row in preview.iterrows():
-                if 'Part Number' in str(row.values) or '料号' in str(row.values):
-                    header_idx = i
-                    break
-            
-            # --- 读取完整数据 ---
-            uploaded_file.seek(0) # 再次把指针拨回开头
-            df = pd.read_csv(uploaded_file, header=header_idx, encoding=file_encoding)
-            df.columns = df.columns.str.replace('\n', ' ', regex=False).str.strip()
-            
-            # --- 自动映射关键列 ---
-            mapping = {'Part Number': 'Part_No', 'Material U/P': 'Contract_UP', 'Vendor': 'Supplier'}
-            final_cols = {col: mapping[k] for col in df.columns for k in mapping if k in col}
-            
-            if len(final_cols) < 2:
-                st.error("Missing key columns in CSV! Please check the file.")
-            else:
-                df_clean = df[list(final_cols.keys())].rename(columns=final_cols)
-                df_clean['Contract_UP'] = pd.to_numeric(df_clean['Contract_UP'].astype(str).str.replace(r'[\$,]', '', regex=True), errors='coerce')
+                uploaded_file.seek(0) # 每次尝试前，把文件指针拨回开头
+                preview = pd.read_csv(uploaded_file, header=None, nrows=50, encoding=enc)
+                successful_encoding = enc
+                break # 如果没报错，就立刻跳出循环！
+            except Exception:
+                continue # 如果报错了，就换下一个编码继续试
                 
-                # 存入 Session
-                st.session_state['master_data'] = df_clean.dropna(subset=['Part_No', 'Contract_UP'])
-                st.success(f"✅ Data Loaded Successfully! (Encoding: {file_encoding})")
-                st.dataframe(st.session_state['master_data'].head())
+        if successful_encoding is None:
+            st.error("文件编码过于特殊，无法自动解析。请在 Excel 中打开该文件，然后选择『另存为 -> CSV (UTF-8 逗号分隔)』后重新上传。")
+        else:
+            try:
+                # --- 2. 自动找表头 ---
+                header_idx = 0
+                for i, row in preview.iterrows():
+                    row_str = " ".join([str(x) for x in row.values])
+                    if 'Part Number' in row_str or '料号' in row_str:
+                        header_idx = i
+                        break
                 
-        except Exception as e:
-            st.error(f"Error: {e}")
+                # --- 3. 读取完整数据 ---
+                uploaded_file.seek(0) 
+                df = pd.read_csv(uploaded_file, header=header_idx, encoding=successful_encoding)
+                df.columns = df.columns.astype(str).str.replace('\n', ' ', regex=False).str.strip()
+                
+                # --- 4. 自动映射关键列 ---
+                mapping = {'Part Number': 'Part_No', 'Material U/P': 'Contract_UP', 'Vendor': 'Supplier'}
+                final_cols = {col: mapping[k] for col in df.columns for k in mapping if k in col}
+                
+                if len(final_cols) < 2:
+                    st.error(f"成功读取文件 (编码: {successful_encoding})，但找不到 'Part Number' 和 'Material U/P' 列，请检查表头名是否匹配。")
+                else:
+                    df_clean = df[list(final_cols.keys())].rename(columns=final_cols)
+                    df_clean['Contract_UP'] = pd.to_numeric(df_clean['Contract_UP'].astype(str).str.replace(r'[\$,]', '', regex=True), errors='coerce')
+                    
+                    # 存入 Session
+                    st.session_state['master_data'] = df_clean.dropna(subset=['Part_No', 'Contract_UP'])
+                    st.success(f"✅ Data Loaded Successfully! (Auto-detected encoding: {successful_encoding})")
+                    st.dataframe(st.session_state['master_data'].head())
+                    
+            except Exception as e:
+                st.error(f"处理数据时出错: {e}")
 
 # --- TAB 1: 分析逻辑（连通 Tab 3） ---
 with tab1:
