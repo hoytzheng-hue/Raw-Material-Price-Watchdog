@@ -3,3 +3,4 @@ pandas
 plotly
 Jinja2
 matplotlib
+requests

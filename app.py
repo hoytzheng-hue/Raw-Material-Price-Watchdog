@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
+import requests
 
 st.set_page_config(page_title="Price Watchdog v1.0", layout="wide")
 
@@ -78,6 +79,25 @@ with st.spinner('Syncing data from Google Sheets...'):
 
 tab1, tab2, tab3 = st.tabs(["🚨 Variance Analysis", "📧 Email Generator", "📂 Data Management"])
 
+import requests # 记得确保文件最开头有 import requests，如果没有请加在最顶上
+
+# ==========================================
+# 实时 API 抓取函数 (带1小时缓存，防止被封IP)
+# ==========================================
+@st.cache_data(ttl=3600)
+def fetch_live_metal_price(muid="201303070021"):
+    url = f"https://market.metal.com/history/api/getBriefMarket?muid={muid}"
+    headers = {"User-Agent": "Mozilla/5.0", "Referer": "https://www.metal.com/"}
+    try:
+        response = requests.get(url, headers=headers, timeout=5)
+        data = response.json()
+        if data.get('success'):
+            price_mt = float(data['data']['last_price'])
+            return round(price_mt / 1000, 3) # 转换为 USD/KG
+        return None
+    except:
+        return None
+
 # ==========================================
 # Sidebar: Dynamic Market Board
 # ==========================================
@@ -89,7 +109,10 @@ if not master_data.empty and 'Material' in master_data.columns:
     unique_materials = master_data['Material'].dropna().unique()
     
     for mat in unique_materials:
-        matched_price = 2.95 
+        matched_price = 2.95 # 默认兜底价格
+        source_label = "📊 (Google Sheet)"
+        
+        # 1. 先尝试从 Google Sheet 里找匹配价格
         for db_mat, db_price in market_dict_db.items():
             if str(mat).lower() in str(db_mat).lower() or str(db_mat).lower() in str(mat).lower():
                 try:
@@ -97,10 +120,22 @@ if not master_data.empty and 'Material' in master_data.columns:
                     break
                 except:
                     pass
-        market_prices[mat] = st.sidebar.number_input(f"{mat}", value=matched_price, step=0.01)
+                    
+        # 2. 💡 高级功能：如果是 A380，尝试用 API 覆盖 Google Sheet 的价格！
+        if "A380" in str(mat).upper():
+            live_price = fetch_live_metal_price()
+            if live_price is not None:
+                matched_price = live_price
+                source_label = "🔥 (Live SMM API)" # 打上实时标签
+                
+        # 渲染到侧边栏，并展示数据来源标签
+        market_prices[mat] = st.sidebar.number_input(
+            f"{mat} {source_label}", 
+            value=matched_price, 
+            step=0.01
+        )
 else:
     st.sidebar.warning("Could not sync data. Please check your Google Sheet tabs and permissions.")
-
 # ==========================================
 # TAB 1: Variance Analysis
 # ==========================================
