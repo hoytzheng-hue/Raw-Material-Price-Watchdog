@@ -5,7 +5,7 @@ import yfinance as yf
 
 st.set_page_config(page_title="Price Watchdog v1.0", layout="wide")
 
-st.title("🛡️ Raw Material Price Watchdog (Full Suite v1.1)")
+st.title("🛡️ Raw Material Price Watchdog (v1.1)")
 
 SHEET_ID = "1qUorrvZ7aj-fRlrJxQpm_6rK2-HolwtWH86SqVcDUWU"
 
