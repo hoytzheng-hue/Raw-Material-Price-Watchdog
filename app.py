@@ -57,7 +57,6 @@ def load_price_book():
             if header_idx != -1:
                 df.columns = df.iloc[header_idx].astype(str).str.replace('\n', ' ', regex=False).str.strip()
                 df = df.iloc[header_idx+1:].reset_index(drop=True)
-        # Updated mapping to 'Current_UP'
         mapping = {'Part Number': 'Part_No', 'Material U/P': 'Current_UP', 'Raw material': 'Material'}
         final_cols = {col: mapping[k] for col in df.columns for k in mapping if k.lower() in str(col).lower()}
         df_clean = df[list(final_cols.keys())].rename(columns=final_cols)
@@ -92,21 +91,16 @@ with tab1:
         df = master_data.copy()
         df['Market_Price'] = df['Material'].map(market_prices)
         df_valid = df[df['Market_Price'] > 0].copy()
-        # Variance calculation: If Current_UP is higher than Market, it's a positive gap (Needs negotiation)
         df_valid['Variance_%'] = ((df_valid['Current_UP'] - df_valid['Market_Price']) / df_valid['Market_Price'] * 100).round(2)
         
         st.subheader("📝 Real-time Variance Details")
-        st.caption("Positive Variance (Red) indicates your current price is higher than the market benchmark.")
-        
-        # Color Logic: Red for buying expensive (High Variance), Green for cheap
         st.dataframe(df_valid.style.background_gradient(cmap='RdYlGn_r', subset=['Variance_%']), 
                      use_container_width=True, hide_index=True)
         
         st.markdown("---")
         col1, col2 = st.columns(2)
         with col1:
-            st.markdown("##### 🎯 Negotiation Targets (High Variance = High Priority)")
-            # Higher bar = Bigger negotiation opportunity
+            st.markdown("##### 🎯 Negotiation Targets")
             fig1 = px.bar(df_valid.sort_values('Variance_%', ascending=False), x='Part_No', y='Variance_%', 
                           color='Variance_%', color_continuous_scale='RdYlGn_r')
             st.plotly_chart(fig1, use_container_width=True)
@@ -119,83 +113,72 @@ with tab1:
                 tr = fetch_trend_history(tick)
                 if not tr.empty:
                     fig2 = px.line(tr, y='Close', title=f"Index Trend: {tick}")
-                    fig2.update_traces(line_color='#2E7D32')
                     st.plotly_chart(fig2, use_container_width=True)
 
-        st.markdown("##### 💰 Price Positioning Matrix")
-        max_v = max(df_valid['Market_Price'].max(), df_valid['Current_UP'].max()) * 1.1
-        fig3 = px.scatter(df_valid, x='Market_Price', y='Current_UP', color='Material', 
-                          hover_data=['Part_No', 'Variance_%'], size_max=15,
-                          range_x=[0, max_v], range_y=[0, max_v])
-        
-        # Diagonal line
-        fig3.add_shape(type="line", x0=0, y0=0, x1=max_v, y1=max_v, line=dict(color="Black", dash="dash"))
-        
-        # Annotate Areas: Above line = Overpriced (Red Zone), Below line = Good Deal (Green Zone)
-        fig3.add_annotation(x=max_v*0.2, y=max_v*0.8, text="🔴 OVERPRICED (Negotiate!)", showarrow=False, font=dict(color="red", size=14))
-        fig3.add_annotation(x=max_v*0.8, y=max_v*0.2, text="🟢 SAFE (Better than Market)", showarrow=False, font=dict(color="green", size=14))
-        
-        fig3.update_layout(xaxis_title="Live Market Price (USD/KG)", yaxis_title="Your Current UP (USD/KG)")
-        st.plotly_chart(fig3, use_container_width=True)
-
-# --- TAB 2: Email Generator ---
+# --- TAB 2: Smart Email Generator ---
 with tab2:
-    st.subheader("📧 Cost Reduction Request Generator")
+    st.subheader("📧 Smart Negotiation Assistant")
     if not df_valid.empty:
-        target_parts = st.multiselect("Select parts to include in the negotiation email:", df_valid['Part_No'].unique())
-        if target_parts:
-            selected_df = df_valid[df_valid['Part_No'].isin(target_parts)]
-            vendor_name = st.text_input("Vendor Contact Person:", "Account Manager")
+        # --- SMART RECOMMENDATION LOGIC ---
+        red_zone = df_valid[df_valid['Variance_%'] >= 5].sort_values('Variance_%', ascending=False)
+        green_zone = df_valid[df_valid['Variance_%'] < 5].sort_values('Variance_%', ascending=False)
+        
+        st.markdown("#### 🤖 AI Recommendation")
+        
+        # UI for Red Zone
+        if not red_zone.empty:
+            st.error(f"Found {len(red_zone)} parts with significant overpricing (>= 5% variance).")
+            # Create selection labels with price info
+            red_options = [f"{row['Part_No']} ({row['Material']}) | Gap: +{row['Variance_%']}%" for _, row in red_zone.iterrows()]
+            selected_red = st.multiselect("🔴 Priority: Negotiation Needed (Auto-selected)", 
+                                          options=red_options, 
+                                          default=red_options)
+        
+        # UI for Green/Low Variance Zone
+        if not green_zone.empty:
+            st.success(f"Found {len(green_zone)} parts within or below market average.")
+            green_options = [f"{row['Part_No']} ({row['Material']}) | Gap: {row['Variance_%']}%" for _, row in green_zone.iterrows()]
+            selected_green = st.multiselect("🟢 Info: Stable or Competitive Prices", 
+                                            options=green_options)
+        
+        # Combine selections for email
+        final_selection_ids = [s.split(" ")[0] for s in (selected_red + selected_green)]
+        
+        if final_selection_ids:
+            selected_df = df_valid[df_valid['Part_No'].isin(final_selection_ids)]
+            avg_gap = selected_df['Variance_%'].mean().round(2)
             
+            st.divider()
+            st.markdown(f"**Email Preview** (Average Reduction Opportunity: `{avg_gap}%`)")
+            
+            vendor_name = st.text_input("Vendor Contact Person:", "Account Manager")
             email_body = f"Dear {vendor_name},\n\n"
-            email_body += "We have been reviewing our current purchasing costs against global commodity indices. "
-            email_body += "Our records indicate that the raw material market has shifted significantly, creating a gap between our current unit prices and market benchmarks.\n\n"
-            email_body += "The following items have been identified for price realignment:\n\n"
+            email_body += "I am writing to formally request a price review for the components listed below. "
+            email_body += "Our supply chain intelligence system, which tracks live global commodity indices, indicates a significant shift in market benchmarks.\n\n"
             
             for _, row in selected_df.iterrows():
-                email_body += f"- Part No: {row['Part_No']} | Current UP: ${row['Current_UP']} | Market Index: ${row['Market_Price']} | Gap: {row['Variance_%']}%\n"
+                email_body += f"- Part No: {row['Part_No']} ({row['Material']}) | Current UP: ${row['Current_UP']} | Market Reference: ${row['Market_Price']} | Variance: {row['Variance_%']}%\n"
             
-            email_body += "\nWe value our partnership and request your support in adjusting these prices to reflect the current market conditions. "
-            email_body += "Please provide us with a revised quotation for these parts by the end of the week.\n\n"
-            email_body += "Looking forward to your prompt response.\n\nBest Regards,\n[Your Name]\nSupply Chain Dept."
+            email_body += f"\nOn average, these items show a {avg_gap}% variance compared to the current market index. "
+            email_body += "We value our long-term partnership and expect our pricing to reflect these market improvements.\n\n"
+            email_body += "Please provide a revised quotation and a proposal for price realignment by the end of this week.\n\nBest Regards,\n[Your Name]\nProcurement Department"
             
-            st.text_area("Email Draft:", email_body, height=350)
-            st.caption("Tip: Highlight and copy the text above to your email client.")
+            st.text_area("Final Draft:", email_body, height=350)
         else:
-            st.info("Select parts from the dropdown to generate an email draft.")
+            st.info("Select parts above to generate the negotiation email.")
     else:
-        st.warning("No valid data available.")
+        st.warning("No data available.")
 
 # --- TAB 3: Documentation ---
 with tab3:
-    st.subheader("📂 System Configuration & User Guide")
-    st.markdown(f"### 🔗 [✏️ Open Database (Google Sheets)](https://docs.google.com/spreadsheets/d/{SHEET_ID}/edit)")
-    
+    st.subheader("📂 System Configuration")
+    st.markdown(f"### 🔗 [✏️ Open Google Sheets](https://docs.google.com/spreadsheets/d/{SHEET_ID}/edit)")
     if st.button("🔄 Clear Cache & Sync Data"):
         st.cache_data.clear()
         st.rerun()
-
-    st.markdown("---")
     with st.expander("📖 Detailed Operational Manual", expanded=True):
         st.markdown("""
-        #### **1. Understanding the Logic**
-        * **Current UP**: This is the price you are currently paying (sourced from the 'Quotation' tab in Google Sheets).
-        * **Market Price**: The benchmark price. It comes from **Yahoo Finance API** (Live Futures) or your **Google Sheets 'Market Price' tab** (Spot prices).
-        * **Variance (%)**: Calculated as `(Current UP - Market Price) / Market Price`. 
-            * **High Positive % (RED)**: You are overpaying. Negotiation is needed.
-            * **Negative % (GREEN)**: Your contract is better than the current market rate.
-
-        #### **2. Visual Dashboard Guide**
-        * **Bar Chart**: Sorted by Variance. The tallest bars on the left are your **highest priority** for cost saving.
-        * **Price Positioning Matrix**: 
-            * **Red Zone (Top-Left)**: Parts in this area have a high `Current UP` despite low `Market Price`. 
-            * **Diagonal Line**: This represents the 'Breakeven' where your price equals the market.
-        
-        #### **3. Data Maintenance (Google Sheets)**
-        To keep the system accurate, ensure your Google Sheet follows these rules:
-        * **'Quotation' Tab**: Must contain `Part Number` and `Material U/P`. This is your price book.
-        * **'Market Price' Tab**: Use this for materials that don't have a live API (like Zamak 3). Ensure the columns contain `Material` and `USD`.
-        
-        #### **4. API Refresh**
-        Prices from Yahoo Finance update every hour. If you suspect data is stale, use the **'Clear Cache'** button above to force a fresh pull.
+        - **🔴 Priority List**: Parts where Current UP is >5% higher than Market. These are auto-selected for negotiation.
+        - **🟢 Stable List**: Parts where you are either at or below market price. 
+        - **Smart Email**: Automatically calculates the average gap to give you a strong opening line for negotiation.
         """)
