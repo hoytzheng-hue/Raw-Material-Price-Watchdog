@@ -5,28 +5,17 @@ import yfinance as yf
 
 st.set_page_config(page_title="Price Watchdog v1.0", layout="wide")
 
-st.title("🛡️ Raw Material Price Watchdog (Visual Analytics)")
+st.title("🛡️ Raw Material Price Watchdog (Full Suite)")
 
 SHEET_ID = "1qUorrvZ7aj-fRlrJxQpm_6rK2-HolwtWH86SqVcDUWU"
 
-# ==========================================
-# 💡 Yahoo Finance Tickers (API Dictionary)
-# ==========================================
+# API Mapping
 API_TICKERS = {
-    "A380": "ALI=F",
-    "ADC12": "ALI=F",
-    "6063": "ALI=F",
-    "AL 7075": "ALI=F",
-    "SPCC": "HRC=F",
-    "SECC": "HRC=F",
-    "SUS": "HRC=F", 
-    "PVC": "CL=F",
-    "C3604": "HG=F"
+    "A380": "ALI=F", "ADC12": "ALI=F", "6063": "ALI=F", "AL 7075": "ALI=F",
+    "SPCC": "HRC=F", "SECC": "HRC=F", "SUS": "HRC=F", "PVC": "CL=F", "C3604": "HG=F"
 }
 
-# ==========================================
-# 1. API 与 数据抓取模块
-# ==========================================
+# --- Data Engines ---
 @st.cache_data(ttl=3600)
 def fetch_live_price(ticker):
     try:
@@ -40,12 +29,9 @@ def fetch_live_price(ticker):
         return None
     except: return None
 
-# 专门用于抓取 3个月历史走势 的新函数
-@st.cache_data(ttl=86400) # 缓存一天
+@st.cache_data(ttl=86400)
 def fetch_trend_history(ticker):
-    try:
-        hist = yf.Ticker(ticker).history(period="3mo")
-        return hist[['Close']]
+    try: return yf.Ticker(ticker).history(period="3mo")[['Close']]
     except: return pd.DataFrame()
 
 @st.cache_data(ttl=600)
@@ -66,143 +52,125 @@ def load_price_book():
         if not any('Part Number' in str(c) or '料号' in str(c) for c in df.columns):
             header_idx = -1
             for i, row in df.iterrows():
-                row_str = " ".join([str(x) for x in row.values])
-                if 'Part Number' in row_str or '料号' in row_str:
+                if 'Part Number' in " ".join([str(x) for x in row.values]):
                     header_idx = i; break
             if header_idx != -1:
                 df.columns = df.iloc[header_idx].astype(str).str.replace('\n', ' ', regex=False).str.strip()
                 df = df.iloc[header_idx+1:].reset_index(drop=True)
-
-        mapping = {'Part Number': 'Part_No', 'Material U/P': 'Contract_UP', 'Raw material': 'Material', 'Material Spec': 'Material', '材质': 'Material'}
+        mapping = {'Part Number': 'Part_No', 'Material U/P': 'Contract_UP', 'Raw material': 'Material'}
         final_cols = {col: mapping[k] for col in df.columns for k in mapping if k.lower() in str(col).lower()}
-        if 'Part_No' not in final_cols.values(): return pd.DataFrame()
         df_clean = df[list(final_cols.keys())].rename(columns=final_cols)
         df_clean['Contract_UP'] = pd.to_numeric(df_clean['Contract_UP'].astype(str).str.replace(r'[\$,]', '', regex=True), errors='coerce')
         return df_clean.dropna(subset=['Part_No', 'Contract_UP'])
     except: return pd.DataFrame()
 
-# ==========================================
-# 网页主逻辑
-# ==========================================
-with st.spinner('Loading APIs and Data...'):
-    market_dict_db = load_market_data()
-    master_data = load_price_book()
+# --- App Logic ---
+market_dict_db = load_market_data()
+master_data = load_price_book()
 
 tab1, tab2, tab3 = st.tabs(["🚨 Variance Analytics", "📧 Email Generator", "📂 Data Management"])
 
-# 侧边栏
+# Sidebar Feed
 st.sidebar.header("📡 Live Market Feed")
 market_prices = {} 
-if not master_data.empty and 'Material' in master_data.columns:
+if not master_data.empty:
     for mat in master_data['Material'].dropna().unique():
-        matched_price, source_label = 0.00, "⚠️ (No Data)"
-        for db_mat, db_price in market_dict_db.items():
-            if str(mat).lower() in str(db_mat).lower() or str(db_mat).lower() in str(mat).lower():
-                try: matched_price, source_label = float(db_price), "📊 (Google Sheet)"; break
-                except: pass
-        for known_mat, ticker in API_TICKERS.items():
-            if known_mat.lower() in str(mat).lower():
-                live_price = fetch_live_price(ticker)
-                if live_price is not None: matched_price, source_label = live_price, f"🔥 (Yahoo: {ticker})"
-                elif source_label == "📊 (Google Sheet)": source_label = "⚠️ (API Down, Used Sheet)"
+        p, label = 0.0, "⚠️ (No Data)"
+        for db_m, db_p in market_dict_db.items():
+            if str(mat).lower() in str(db_m).lower(): p, label = float(db_p), "📊 (Sheet)"; break
+        for k, v in API_TICKERS.items():
+            if k.lower() in str(mat).lower():
+                live = fetch_live_price(v)
+                if live: p, label = live, f"🔥 (Yahoo: {v})"
                 break
-        market_prices[mat] = st.sidebar.number_input(f"{mat} {source_label}", value=matched_price, step=0.01)
+        market_prices[mat] = st.sidebar.number_input(f"{mat} {label}", value=p, step=0.01)
 
-# ==========================================
-# TAB 1: Variance Analytics (图表大升级)
-# ==========================================
+# --- TAB 1: Analytics ---
 with tab1:
-    if not master_data.empty and 'Material' in master_data.columns:
+    if not master_data.empty:
         df = master_data.copy()
         df['Market_Price'] = df['Material'].map(market_prices)
-        cols = ['Part_No', 'Material', 'Contract_UP', 'Market_Price']
-        df = df[cols + [c for c in df.columns if c not in cols]]
         df_valid = df[df['Market_Price'] > 0].copy()
+        df_valid['Variance_%'] = ((df_valid['Market_Price'] - df_valid['Contract_UP']) / df_valid['Contract_UP'] * 100).round(2)
         
-        if not df_valid.empty:
-            df_valid['Variance_%'] = ((df_valid['Market_Price'] - df_valid['Contract_UP']) / df_valid['Contract_UP'] * 100).round(2)
-            
-            # 1. 核心数据表
-            st.subheader("📝 Variance Details (Data Table)")
-            st.dataframe(df_valid.style.background_gradient(cmap='RdYlGn', subset=['Variance_%']), use_container_width=True)
-            
-            st.markdown("---")
-            st.subheader("📊 Visual Analytics Dashboard")
-            
-            # 将屏幕分为左右两栏显示图表
-            col1, col2 = st.columns(2)
-            
-            # 图表 1: 降价谈判优先级 (左侧)
-            with col1:
-                st.markdown("##### 🎯 Negotiation Priority (Variance by Part)")
-                df_chart = df_valid.sort_values(by='Variance_%')
-                # 越红越是我们要优先杀价的
-                fig1 = px.bar(df_chart, x='Part_No', y='Variance_%', color='Variance_%', 
-                              color_continuous_scale=['#FF4B4B', '#F0F2F6', '#09AB3B'], 
-                              labels={'Variance_%': 'Variance (%)', 'Part_No': 'Part Number'})
-                fig1.update_layout(margin=dict(l=0, r=0, t=30, b=0))
-                st.plotly_chart(fig1, use_container_width=True)
-            
-            # 图表 2: 3个月市场大盘走势 (右侧)
-            with col2:
-                st.markdown("##### 📉 3-Month Market Trend (API Source)")
-                # 找出当前表里连接了 API 的材料
-                api_mats = [m for m in df_valid['Material'].unique() if any(k.lower() in str(m).lower() for k in API_TICKERS.keys())]
-                
-                if api_mats:
-                    selected_mat = st.selectbox("Select material to view historical trend:", api_mats, label_visibility="collapsed")
-                    # 找出对应的 Ticker
-                    matched_ticker = next(v for k, v in API_TICKERS.items() if k.lower() in str(selected_mat).lower())
-                    
-                    trend_df = fetch_trend_history(matched_ticker)
-                    if not trend_df.empty:
-                        fig2 = px.line(trend_df, x=trend_df.index, y='Close', 
-                                       title=f"Global Trend for {matched_ticker}",
-                                       labels={'Close': 'Commodity Index Price', 'Date': 'Date'})
-                        fig2.update_traces(line_color='#FF4B4B')
-                        fig2.update_layout(margin=dict(l=0, r=0, t=40, b=0))
-                        st.plotly_chart(fig2, use_container_width=True)
-                else:
-                    st.info("No API-linked materials found to display trend.")
-                    
-            # 图表 3: 价格散点矩阵 (底部全宽)
-            st.markdown("##### 💰 Price Position: Market vs Contract")
-            st.caption("Parts located above the dotted line are overpriced compared to the current market benchmark.")
-            fig3 = px.scatter(df_valid, x='Market_Price', y='Contract_UP', color='Material', 
-                              hover_data=['Part_No', 'Variance_%'], size_max=15,
-                              labels={'Market_Price': 'Live Market Price (USD/kg)', 'Contract_UP': 'Original Contract Price (USD/kg)'})
-            
-            # 添加一条 x=y 的虚线辅助线 (在这条线上的表示市场价=合同价)
-            max_val = max(df_valid['Market_Price'].max(), df_valid['Contract_UP'].max())
-            fig3.add_shape(type="line", line=dict(dash='dash', color='gray'), x0=0, y0=0, x1=max_val, y1=max_val)
-            fig3.update_layout(margin=dict(l=0, r=0, t=30, b=0))
-            st.plotly_chart(fig3, use_container_width=True)
-            
-        else:
-            st.warning("Data loaded, but waiting for valid Market Prices. Please configure Google Sheet or APIs.")
+        st.subheader("📝 Variance Details")
+        # 隐藏索引列 (Row ID)
+        st.dataframe(df_valid.style.background_gradient(cmap='RdYlGn_r', subset=['Variance_%']), 
+                     use_container_width=True, hide_index=True)
+        
+        st.markdown("---")
+        col1, col2 = st.columns(2)
+        with col1:
+            st.markdown("##### 🎯 Negotiation Priority")
+            fig1 = px.bar(df_valid.sort_values('Variance_%'), x='Part_No', y='Variance_%', color='Variance_%', 
+                          color_continuous_scale='RdYlGn_r')
+            st.plotly_chart(fig1, use_container_width=True)
+        with col2:
+            st.markdown("##### 📉 3-Month Market Trend")
+            api_mats = [m for m in df_valid['Material'].unique() if any(k.lower() in str(m).lower() for k in API_TICKERS.keys())]
+            if api_mats:
+                sel = st.selectbox("Select material:", api_mats)
+                tick = next(v for k, v in API_TICKERS.items() if k.lower() in str(sel).lower())
+                tr = fetch_trend_history(tick)
+                if not tr.empty:
+                    fig2 = px.line(tr, y='Close', title=f"Trend: {tick}")
+                    st.plotly_chart(fig2, use_container_width=True)
 
-# ==========================================
-# TAB 3: Data Management & Documentation
-# ==========================================
+        st.markdown("##### 💰 Price Position: Market vs Contract")
+        max_v = max(df_valid['Market_Price'].max(), df_valid['Contract_UP'].max()) * 1.1
+        fig3 = px.scatter(df_valid, x='Market_Price', y='Contract_UP', color='Material', hover_data=['Part_No'],
+                          range_x=[0, max_v], range_y=[0, max_v])
+        # 绘制红绿背景
+        fig3.add_shape(type="line", x0=0, y0=0, x1=max_v, y1=max_v, line=dict(color="Black", dash="dash"))
+        # 上方红色区域 (Contract > Market)
+        fig3.add_trace(px.scatter(x=[0, max_v], y=[0, max_v]).data[0]) # Dummy for legend if needed
+        fig3.add_hrect(y0=0, y1=max_v, fillcolor="red", opacity=0.05, layer="below") 
+        # 这里的逻辑通过背景色简单示意：上方危险，下方安全
+        fig3.update_layout(margin=dict(l=0, r=0, t=30, b=0))
+        st.plotly_chart(fig3, use_container_width=True)
+
+# --- TAB 2: Email Generator ---
+with tab2:
+    st.subheader("📧 Professional Price Revision Request")
+    if not df_valid.empty:
+        target_parts = st.multiselect("Select parts to include in the email:", df_valid['Part_No'].unique())
+        
+        if target_parts:
+            selected_df = df_valid[df_valid['Part_No'].isin(target_parts)]
+            
+            st.info("The system will generate a professional email based on the selected price gaps.")
+            
+            vendor_name = st.text_input("Vendor Contact Name:", "Valued Partner")
+            
+            # Email Template Logic
+            email_body = f"Dear {vendor_name},\n\n"
+            email_body += "I am writing to discuss the current pricing for the components we source from your company. "
+            email_body += "Based on our latest market intelligence and global commodity index tracking, we have observed a significant downward trend in raw material costs.\n\n"
+            email_body += "Specifically, the following parts show a notable variance compared to current market benchmarks:\n\n"
+            
+            for _, row in selected_df.iterrows():
+                email_body += f"- Part: {row['Part_No']} ({row['Material']}) | Contract: ${row['Contract_UP']} | Market Ref: ${row['Market_Price']} | Variance: {row['Variance_%']}%\n"
+            
+            email_body += "\nGiven these market shifts, we kindly request a formal price review for these items to align with the current index. "
+            email_body += "Could you please provide a revised quotation by the end of this week?\n\n"
+            email_body += "Thank you for your continued partnership.\n\nBest Regards,\n[Your Name]\nProcurement Team"
+            
+            st.text_area("Generated Email Draft:", email_body, height=400)
+            st.button("📋 Copy to Clipboard (Demo)")
+        else:
+            st.write("Please select at least one part from the list above.")
+    else:
+        st.warning("No data available to generate email.")
+
+# --- TAB 3: Management ---
 with tab3:
-    st.subheader("Database & API Status")
-    st.success("✅ Connected to Google Sheets & Yahoo Finance Global API.")
-    st.markdown(f"### 🔗 [✏️ **Click Here to Edit the Google Sheets Database**](https://docs.google.com/spreadsheets/d/{SHEET_ID}/edit)")
-    
-    if st.button("🔄 Force Refresh System (Clear Cache)"):
+    st.markdown(f"### 🔗 [✏️ Edit Google Sheets](https://docs.google.com/spreadsheets/d/{SHEET_ID}/edit)")
+    if st.button("🔄 Force Refresh System"):
         st.cache_data.clear()
         st.rerun()
-
-    st.markdown("---")
-    with st.expander("📖 User Guide & System Logic", expanded=True):
+    with st.expander("📖 User Guide", expanded=True):
         st.markdown("""
-        ### 1. Hybrid Data Architecture
-        * **Priority A (API)**: Fetches live global commodity futures from Yahoo Finance (🔥 label).
-        * **Priority B (Google Sheet)**: Falls back to local spot prices in `Market Price` tab (📊 label).
+        - **🚨 Variance Analytics**: Real-time gap analysis. Red means the market has dropped and you should ask for a discount.
+        - **📧 Email Generator**: Select overpriced parts and get an instant professional draft.
+        - **Scatter Plot**: Parts in the **Upper/Reddish area** are your top negotiation targets.
         """)
-
-# ==========================================
-# TAB 2: Email Generator
-# ==========================================
-with tab2: 
-    st.write("Ready for email module.")
