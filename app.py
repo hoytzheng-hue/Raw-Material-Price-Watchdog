@@ -5,26 +5,24 @@ import yfinance as yf
 
 st.set_page_config(page_title="Price Watchdog v1.0", layout="wide")
 
-st.title("🛡️ Raw Material Price Watchdog (Yahoo Finance Live)")
+st.title("🛡️ Raw Material Price Watchdog (Hybrid Live)")
 
 SHEET_ID = "1qUorrvZ7aj-fRlrJxQpm_6rK2-HolwtWH86SqVcDUWU"
 
 # ==========================================
-# 💡 核心升级：全球大宗商品期货代码库 (Yahoo Finance Tickers)
+# 💡 全球大宗商品期货代码库 (Yahoo Finance Tickers)
+# 锌合金(Zamak)因为缺乏公开高频现货接口，没有写在这里。
+# 系统发现这里没有 Zamak，就会自动去你的 Google Sheet 寻找。
 # ==========================================
 API_TICKERS = {
-    # 铝系材料 -> 锚定国际铝期货 (ALI=F)
     "A380": "ALI=F",
     "ADC12": "ALI=F",
     "6063": "ALI=F",
     "AL 7075": "ALI=F",
-    # 钢系材料 -> 锚定国际热轧卷板期货 (HRC=F)
     "SPCC": "HRC=F",
     "SECC": "HRC=F",
     "SUS": "HRC=F", 
-    # 塑料系 -> 锚定原油期货风向标 (CL=F)
     "PVC": "CL=F",
-    # 铜/黄铜 -> 锚定国际铜期货 (HG=F)
     "C3604": "HG=F"
 }
 
@@ -34,21 +32,15 @@ API_TICKERS = {
 @st.cache_data(ttl=3600)
 def fetch_live_price(ticker):
     try:
-        # 从雅虎财经拉取当天的期货收盘价
         data = yf.Ticker(ticker).history(period="1d")
         if not data.empty:
             price = float(data['Close'].iloc[-1])
-            
-            # 数据清洗：原油和铜的计价单位不同，如果是铝(ALI=F)，通常是 美元/吨
-            # 为了统一展示为 USD/KG，我们将大宗商品价格做一个标准化转换
-            # (注意：此处展示的是纯原材料大盘基准价，用于监控“趋势差异”)
             if ticker in ["ALI=F", "HRC=F"]:
-                return round(price / 1000, 3) # 美元/吨 转换为 美元/KG
+                return round(price / 1000, 3) 
             elif ticker == "HG=F":
-                return round(price * 2.2046, 3) # 铜是按磅计价，转换为KG
+                return round(price * 2.2046, 3) 
             elif ticker == "CL=F":
-                return round(price / 159, 3) # 简单将原油的 桶 转换为升/KG的粗略参考
-            
+                return round(price / 159, 3) 
             return round(price, 3)
         return None
     except Exception as e:
@@ -62,6 +54,7 @@ def load_market_data():
     url = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/gviz/tq?tqx=out:csv&sheet=Market%20Price"
     try:
         df = pd.read_csv(url)
+        # 寻找包含 Material 和 USD 的标准表头
         mat_col = [c for c in df.columns if 'Material' in str(c) or 'Grade' in str(c)][0]
         price_col = [c for c in df.columns if 'USD' in str(c) or 'Cost' in str(c)][0]
         return dict(zip(df[mat_col].astype(str), df[price_col]))
@@ -113,23 +106,28 @@ market_prices = {}
 if not master_data.empty and 'Material' in master_data.columns:
     unique_materials = master_data['Material'].dropna().unique()
     for mat in unique_materials:
-        matched_price = 2.95
-        source_label = "📊 (Google Sheet)"
+        # 💡 彻底取消默认值，找不到数据就是 0.00
+        matched_price = 0.00
+        source_label = "⚠️ (No Data Found)" 
         
-        # A: 谷歌表格保底价
+        # 步骤 A: 优先尝试从 Google Sheet 拉取底线价
         for db_mat, db_price in market_dict_db.items():
             if str(mat).lower() in str(db_mat).lower() or str(db_mat).lower() in str(mat).lower():
-                try: matched_price = float(db_price); break
-                except: pass
+                try: 
+                    matched_price = float(db_price)
+                    source_label = "📊 (Google Sheet)"
+                    break
+                except: 
+                    pass
                 
-        # B: 雅虎财经 API 实时覆盖！
+        # 步骤 B: 如果该材料在 API 词典里有配置，强制覆盖为实时行情！
         for known_mat, ticker in API_TICKERS.items():
             if known_mat.lower() in str(mat).lower():
                 live_price = fetch_live_price(ticker)
                 if live_price is not None:
                     matched_price = live_price
                     source_label = f"🔥 (Yahoo: {ticker})"
-                else:
+                elif source_label == "📊 (Google Sheet)":
                     source_label = "⚠️ (API Down, Used Sheet)" 
                 break
                 
@@ -142,15 +140,25 @@ with tab1:
             df['Market_Price'] = df['Material'].map(market_prices)
             cols = ['Part_No', 'Material', 'Contract_UP', 'Market_Price']
             df = df[cols + [c for c in df.columns if c not in cols]]
-            df['Variance_%'] = ((df['Market_Price'] - df['Contract_UP']) / df['Contract_UP'] * 100).round(2)
             
-            st.subheader("Price Comparison Details")
-            st.dataframe(df.style.background_gradient(cmap='RdYlGn', subset=['Variance_%']))
+            # 💡 只有市场价大于 0 的零件才会参与计算，防止 0.00 导致的错误报警
+            df_valid = df[df['Market_Price'] > 0].copy()
+            
+            if not df_valid.empty:
+                df_valid['Variance_%'] = ((df_valid['Market_Price'] - df_valid['Contract_UP']) / df_valid['Contract_UP'] * 100).round(2)
+                
+                st.subheader("Price Comparison Details")
+                st.write("Note: A **negative, red Variance** means the current market price is lower than the contract price.")
+                st.dataframe(df_valid.style.background_gradient(cmap='RdYlGn', subset=['Variance_%']))
+            else:
+                st.warning("Data loaded, but waiting for valid Market Prices. Please configure Google Sheet or APIs.")
             
 with tab3:
     st.success("✅ Connected to Google Sheets & Yahoo Finance Global API.")
-    st.write("Prices are pulled from live international commodities markets (LME/COMEX) via Yahoo Finance. If unavailable, it falls back to your Google Sheet.")
-    if st.button("Force Refresh APIs"):
+    st.write("Prices are pulled from live international markets (Yahoo Finance). If unavailable, it falls back to your Google Sheet.")
+    
+    # 强制刷新按钮
+    if st.button("Force Refresh System (清除缓存)"):
         st.cache_data.clear()
         st.rerun()
 
